@@ -1,3 +1,4 @@
+import logging
 import secrets
 from urllib.parse import urlencode
 
@@ -12,16 +13,20 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_db
+from ..ingestion import delete_source
 from ..models import Source, User
-from ..security import COOKIE, current_user, encrypt, set_session, sign, verify
+from ..security import COOKIE, current_user, decrypt, encrypt, set_session, sign, verify
+from ..services import Services, get_services
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+log = logging.getLogger(__name__)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 LOGIN_SCOPES = "openid email profile"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 STATE_COOKIE = "sb_oauth_state"
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 
 def _redirect_uri() -> str:
@@ -160,3 +165,19 @@ def me(user: User = Depends(current_user)):
         "is_admin": user.is_admin,
         "drive_connected": bool(user.drive_refresh_token_enc),
     }
+
+
+@router.delete("/drive", status_code=204)
+def drive_disconnect(
+    db: Session = Depends(get_db), user: User = Depends(current_user), svc: Services = Depends(get_services)
+):
+    """Forget Drive: remove everything indexed from it, revoke the token at Google, drop our copy."""
+    for src in db.scalars(select(Source).where(Source.owner_id == user.id, Source.kind == "drive")).all():
+        delete_source(db, svc, src)
+    if user.drive_refresh_token_enc:
+        try:
+            httpx.post(REVOKE_URL, data={"token": decrypt(user.drive_refresh_token_enc)}, timeout=10)
+        except Exception:  # best effort: the local copy is removed either way
+            log.warning("could not revoke the Drive token at Google", exc_info=True)
+        user.drive_refresh_token_enc = None
+        db.commit()

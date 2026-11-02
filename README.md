@@ -32,7 +32,12 @@ Question ─▶ user's principals ─▶ Qdrant hybrid search (RRF) with ACL PRE
 - **Follow-ups**: the client sends recent turns; the backend rewrites the latest message into a standalone
   search question (falls back to the original if that fails). History never widens access: retrieval is
   always filtered for the signed-in user. Citations are grouped per document.
-- **Admin view** (`/admin`): totals, per-source sync status/errors, recent-query audit log.
+- **Always-fresh permissions**: GitHub/Drive sources re-sync automatically every `SYNC_INTERVAL_MINUTES` (default 60,
+  `0` disables), so a revoked share stops granting access without anyone pressing Sync. A sync interrupted by a
+  restart is marked as such at startup instead of staying "syncing" forever.
+- **Privacy controls**: *Disconnect Drive* removes everything indexed from it and revokes the token at Google;
+  uploads can be deleted one by one. Supported files: PDF, DOCX, TXT/MD/CSV/JSON and common code files.
+- **Admin view** (`/admin`): totals, per-source sync status/errors with *Sync now*, user **group** editor, recent-query audit log.
 
 ## Run it
 
@@ -61,9 +66,9 @@ Set `FORCE_IPV4=true` in `.env` (see `backend/app/net.py`).
 ```bash
 cd backend && .venv/bin/python -m pytest -q
 ```
-Covers (30 tests): private docs invisible to others (and never sent to the LLM), org sharing, exact-ID keyword matching,
+Covers (38 tests): private docs invisible to others (and never sent to the LLM), org sharing, exact-ID keyword matching,
 ACL grant/revoke without re-embedding, group principals, upstream-deletion pruning, Drive ACL translation, authz,
-reranker only seeing accessible chunks, streaming events and ACL, follow-up rewriting, citation parsing, Gemini rate limiting.
+auto-sync and restart recovery, quota handling (clean 503, auto-sync pause, failed re-index keeps old chunks), Drive disconnect, per-file delete, DOCX, reranker only seeing accessible chunks, streaming events and ACL, follow-up rewriting, citation parsing, Gemini rate limiting.
 Tests use a fake embedder/LLM; **real Gemini, Google OAuth and Drive calls are not covered by automated tests**
 and need a manual pass with real credentials (GitHub sync, Gemini and the reranker were verified manually).
 
@@ -72,8 +77,9 @@ and need a manual pass with real credentials (GitHub sync, Gemini and the rerank
 | Endpoint | Purpose |
 |---|---|
 | `GET /auth/login`, `/auth/callback`, `POST /auth/logout`, `GET /auth/me` | Google sign-in, session |
-| `GET /auth/drive/connect` | Opt-in Drive consent (read-only scope) |
+| `GET /auth/drive/connect`, `DELETE /auth/drive` | Opt-in Drive consent (read-only scope); disconnect = remove index + revoke token |
 | `GET /sources`, `POST /sources/upload`, `POST /sources/github`, `POST /sources/{id}/sync`, `DELETE /sources/{id}` | Manage your sources |
+| `GET /sources/{id}/documents`, `DELETE /sources/{id}/documents/{doc}` | List files; delete single uploads |
 | `POST /chat`, `POST /chat/stream` (SSE) | Ask a question (20/min/user) |
 | `GET /admin/status`, `GET /admin/users`, `PUT /admin/users/{id}/groups` | Admin only |
 | `GET /health`, `GET /health/ready` | Liveness / readiness (DB + Qdrant) |
@@ -82,7 +88,7 @@ and need a manual pass with real credentials (GitHub sync, Gemini and the rerank
 
 All via environment (see [`.env.example`](.env.example)): `SECRET_KEY`, `POSTGRES_PASSWORD`, `GEMINI_API_KEY`
 (+ `GEMINI_CHAT_MODEL`, `GEMINI_EMBED_MODEL`, `EMBED_PER_MINUTE`), `GOOGLE_CLIENT_ID/SECRET`, `PUBLIC_URL`,
-`ADMIN_EMAILS`, `GITHUB_TOKEN` (optional), `RERANKER_MODEL`, `CHAT_PER_MINUTE`, `QDRANT_URL`, `LOG_LEVEL`,
+`ADMIN_EMAILS`, `GITHUB_TOKEN` (optional), `RERANKER_MODEL`, `CHAT_PER_MINUTE`, `SYNC_INTERVAL_MINUTES`, `QDRANT_URL`, `LOG_LEVEL`,
 `FORCE_IPV4`, `ENV`.
 
 ## Database migrations
@@ -113,6 +119,8 @@ cd backend && .venv/bin/alembic revision --autogenerate -m "describe change"   #
 - The same Drive file synced by two users is indexed twice (once per user's source).
 - Chat history lives in the browser tab only; PDF text only (no OCR). Large first syncs are slow on the free tier (~90 chunks/min).
 - Default reranker model is English-only; for other languages use `BAAI/bge-reranker-v2-m3-int8` (~570 MB).
-- Sync runs in FastAPI background tasks and the chat rate limiter is in-process: fine for one backend replica;
-  for several replicas move sync to a queue (Celery/Arq) and the limiter to Redis.
-- Gemini free tier has daily limits too; a paid key removes the throttling pain.
+- Sync, auto-sync and the chat rate limiter run inside the backend process: fine for one replica; for several,
+  move sync to a queue (Celery/Arq) with a single scheduler, and the limiter to Redis.
+- The Gemini free tier allows only **1000 embedded texts per day**: a few large syncs use it up. When it runs out,
+  syncs stop with a clear status, chat answers a clean 503 until the quota resets, and auto-sync pauses for 6 h.
+  A paid key (and a higher `EMBED_PER_MINUTE`) removes the limit.

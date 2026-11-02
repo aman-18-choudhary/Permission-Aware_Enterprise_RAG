@@ -10,7 +10,7 @@ from ..acl import TENANT_ALL, user_principal
 from ..config import get_settings
 from ..connectors.parsing import extract_text
 from ..db import get_db
-from ..ingestion import delete_source, ingest_document
+from ..ingestion import delete_document, delete_source, ingest_document
 from ..models import Document, Source, User
 from ..security import current_user
 from ..services import Services, get_services
@@ -116,6 +116,39 @@ def sync(source_id: str, background: BackgroundTasks, db: Session = Depends(get_
     db.commit()
     background.add_task(run_sync_background, src.id)
     return {"status": "syncing"}
+
+
+@router.get("/{source_id}/documents")
+def list_documents(source_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    src = _owned(db, source_id, user)
+    docs = db.scalars(select(Document).where(Document.source_id == src.id).order_by(Document.title).limit(500)).all()
+    return [
+        {
+            "id": d.id,
+            "title": d.title,
+            "url": d.url,
+            "chunks": d.chunk_count,
+            "visibility": "everyone" if TENANT_ALL in (d.acl or []) else "restricted",
+        }
+        for d in docs
+    ]
+
+
+@router.delete("/{source_id}/documents/{doc_id}", status_code=204)
+def remove_document(
+    source_id: str,
+    doc_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+    svc: Services = Depends(get_services),
+):
+    src = _owned(db, source_id, user)
+    if src.kind != "upload":
+        raise HTTPException(400, "Files from GitHub/Drive come back on the next sync; remove the source instead")
+    doc = db.get(Document, doc_id)
+    if not doc or doc.source_id != src.id:
+        raise HTTPException(404, "Document not found")
+    delete_document(db, svc, doc)
 
 
 @router.delete("/{source_id}", status_code=204)

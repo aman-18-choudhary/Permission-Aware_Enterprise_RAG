@@ -79,6 +79,7 @@ def test_github_file_filter_skips_noise():
     assert not wanted("frontend/package-lock.json", 1_000)
     assert not wanted("frontend/node_modules/x/index.js", 1_000)
     assert not wanted("assets/logo.png", 1_000)
+    assert not wanted("logs/._train.log", 100)  # macOS resource-fork junk
     assert not wanted("big.md", 900_000)
 
 

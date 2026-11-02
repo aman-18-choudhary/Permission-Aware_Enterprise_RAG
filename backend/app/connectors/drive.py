@@ -14,7 +14,8 @@ EXPORT = {
     "application/vnd.google-apps.presentation": "text/plain",
     "application/vnd.google-apps.spreadsheet": "text/csv",
 }
-DOWNLOAD = {"application/pdf": ".pdf", "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv"}
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+DOWNLOAD = {DOCX: ".docx", "application/pdf": ".pdf", "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv"}
 FIELDS = (
     "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,"
     "owners(emailAddress),permissions(type,emailAddress,domain,role,allowFileDiscovery))"
@@ -55,6 +56,8 @@ def list_files(refresh_token: str):
         res = svc.files().list(q=q, fields=FIELDS, pageSize=100, pageToken=token, orderBy="modifiedTime desc").execute()
         for f in res.get("files", []):
             n += 1
+            if f["name"].startswith("._"):
+                continue  # macOS resource-fork junk, not a real document
             try:
                 mime = f["mimeType"]
                 if mime in EXPORT:

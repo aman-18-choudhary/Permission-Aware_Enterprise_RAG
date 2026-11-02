@@ -42,3 +42,9 @@ th { font-size: 13px; color: var(--muted); text-transform: uppercase; }
 .ask input { margin: 0; }
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
 .stat { background: var(--card); border-radius: 12px; padding: 12px 16px; } .stat .num { font-size: 28px; font-weight: 700; color: var(--navy); }
+
+.files { list-style: none; margin: 0; padding: 0; }
+.files li { display: flex; gap: 12px; align-items: center; padding: 4px 0; border-bottom: 1px solid #e3eaf1; }
+.files li > span:first-child { flex: 1; word-break: break-all; }
+td input { margin: 0; }
+code { background: #e3eaf1; padding: 1px 5px; border-radius: 4px; }

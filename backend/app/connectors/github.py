@@ -18,6 +18,7 @@ def wanted(path: str, size: int) -> bool:
     return (
         size <= MAX_BYTES
         and low.rsplit("/", 1)[-1] not in SKIP_NAMES
+        and not low.rsplit("/", 1)[-1].startswith("._")
         and not any(p in f"/{low}" for p in SKIP_PARTS)
         and any(low.endswith(x) for x in TEXT_EXT)
     )

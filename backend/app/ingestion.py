@@ -45,10 +45,12 @@ def ingest_document(
         return "unchanged"
 
     chunks = chunk_text(text)
+    # Embed BEFORE touching the index: if embedding fails (quota, outage) the previous
+    # version of the document must stay searchable instead of vanishing.
+    # Title is prepended for embedding so each chunk carries its context.
+    dense = svc.embedder.embed_documents([f"{title}\n\n{c}" for c in chunks]) if chunks else []
     svc.store.delete_doc(doc.id)
     if chunks:
-        # Title is prepended for embedding so each chunk carries its context.
-        dense = svc.embedder.embed_documents([f"{title}\n\n{c}" for c in chunks])
         svc.store.upsert_chunks(doc.id, source.id, title, url, acl, chunks, dense)
     doc.title, doc.url, doc.acl = title, url, acl
     doc.content_hash, doc.chunk_count = content_hash, len(chunks)

@@ -7,7 +7,7 @@ export type Source = {
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, { credentials: "include", ...init });
-  if (res.status === 401) throw new Error("unauthenticated");
+  if (res.status === 401) throw new Error("Your session has expired. Please sign in again.");
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail ?? msg; } catch {}
@@ -36,8 +36,13 @@ export async function streamChat(
   h: StreamHandlers,
 ): Promise<void> {
   const res = await fetch("/api/chat/stream", { ...json({ question, history }), credentials: "include" });
-  if (res.status === 401) throw new Error("unauthenticated");
-  if (!res.ok || !res.body) throw new Error(res.statusText || "request failed");
+  if (res.status === 401) throw new Error("Your session has expired. Please sign in again.");
+  if (res.status === 429) throw new Error("You are asking too fast. Wait a few seconds and try again.");
+  if (!res.ok || !res.body) {
+    let detail = res.statusText || "request failed";
+    try { detail = (await res.json()).detail ?? detail; } catch {}
+    throw new Error(typeof detail === "string" ? detail : "request failed");
+  }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";

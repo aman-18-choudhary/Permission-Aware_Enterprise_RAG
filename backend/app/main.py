@@ -2,14 +2,17 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from .config import get_settings
 from .db import engine
 from .migrate import run_migrations
+from .gemini import QuotaExhausted
 from .net import prefer_ipv4
 from .routes import admin, auth, chat, sources
+from .scheduler import AutoSync, reset_stuck_syncs
 from .services import Services, get_services
 
 logging.basicConfig(level=get_settings().log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -37,14 +40,26 @@ async def lifespan(app: FastAPI):
     s = get_settings()
     s.validate_for_runtime()
     run_migrations()
+    reset_stuck_syncs()
     if s.reranker_model and s.gemini_api_key:
         threading.Thread(target=_warm_up, daemon=True).start()
+    auto = None
+    if s.sync_interval_minutes > 0 and s.gemini_api_key:
+        auto = AutoSync(s.sync_interval_minutes * 60)
+        auto.start()
     yield
+    if auto:
+        auto.stop()
 
 
 app = FastAPI(title="Second Brain", lifespan=lifespan)
 for r in (auth.router, sources.router, chat.router, admin.router):
     app.include_router(r)
+
+
+@app.exception_handler(QuotaExhausted)
+async def quota_exhausted(request: Request, exc: QuotaExhausted):
+    return JSONResponse({"detail": "The AI quota for today is used up. Please try again later."}, status_code=503)
 
 
 @app.get("/health")
