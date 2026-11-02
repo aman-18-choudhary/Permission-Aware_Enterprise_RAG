@@ -14,7 +14,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.12.4
     volumes: [qdrant:/qdrant/storage]
-    ports: ["127.0.0.1:6333:6333"]
+    # Not published to the host: only the backend reaches it, over the compose network.
 
   backend:
     build: ./backend
