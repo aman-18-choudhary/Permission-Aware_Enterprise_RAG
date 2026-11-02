@@ -1,9 +1,9 @@
 "use client";
 import { FormEvent, useState } from "react";
-import { api, json, Citation } from "@/lib/api";
+import { streamChat, Citation } from "@/lib/api";
 import { useMe } from "@/lib/useMe";
 
-type Turn = { q: string; a?: string; citations?: Citation[]; error?: string };
+type Turn = { q: string; a?: string; citations?: Citation[]; error?: string; done?: boolean };
 
 export default function Home() {
   const { me, loading } = useMe();
@@ -27,20 +27,31 @@ export default function Home() {
     if (!question || busy) return;
     setQ("");
     setBusy(true);
-    // Prior answered turns, so follow-ups like "when does it launch?" can be resolved.
+    // Prior completed turns, so follow-ups like "when does it launch?" can be resolved.
     const history = turns
-      .filter((t) => t.a)
+      .filter((t) => t.done && t.a)
       .slice(-4)
       .flatMap((t) => [
         { role: "user", content: t.q },
         { role: "assistant", content: t.a as string },
       ]);
+    // Update the newest turn in place as events arrive.
+    const patch = (fn: (t: Turn) => Turn) => setTurns((all) => all.map((x, i) => (i === all.length - 1 ? fn(x) : x)));
     setTurns((t) => [...t, { q: question }]);
     try {
-      const r = await api<{ answer: string; citations: Citation[] }>("/chat", json({ question, history }));
-      setTurns((t) => t.map((x, i) => (i === t.length - 1 ? { ...x, a: r.answer, citations: r.citations } : x)));
+      await streamChat(question, history, {
+        meta: (m) => patch((t) => ({ ...t, citations: m.citations })),
+        token: (d) => patch((t) => ({ ...t, a: (t.a ?? "") + d.text })),
+        done: (d) =>
+          patch((t) => ({
+            ...t,
+            done: true,
+            citations: t.citations?.map((c) => ({ ...c, cited: d.cited.includes(c.n) })),
+          })),
+        error: (e) => patch((t) => ({ ...t, error: e.message })),
+      });
     } catch (err) {
-      setTurns((t) => t.map((x, i) => (i === t.length - 1 ? { ...x, error: (err as Error).message } : x)));
+      patch((t) => ({ ...t, error: (err as Error).message }));
     } finally {
       setBusy(false);
     }
@@ -53,10 +64,11 @@ export default function Home() {
         {turns.map((t, i) => (
           <div key={i} className="turn">
             <div className="q">{t.q}</div>
-            {t.error ? <div className="err">{t.error}</div> : t.a ? (
+            {t.error && <div className="err">{t.error}</div>}
+            {t.a ? (
               <div className="a">
                 <p>{t.a}</p>
-                {!!t.citations?.length && (
+                {t.done && !!t.citations?.length && (
                   <ol className="cites">
                     {t.citations.map((c) => (
                       <li key={c.n} className={c.cited ? "cited" : ""}>
@@ -68,7 +80,7 @@ export default function Home() {
                   </ol>
                 )}
               </div>
-            ) : <div className="muted">Thinking…</div>}
+            ) : !t.error && <div className="muted">Thinking…</div>}
           </div>
         ))}
       </div>

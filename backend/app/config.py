@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     gemini_chat_model: str = "gemini-2.5-flash"
     gemini_embed_model: str = "gemini-embedding-001"
     embed_dim: int = 768
+    embed_per_minute: int = 90  # free tier allows 100 texts/min; raise on a paid key
+
+    # Local cross-encoder reranker (fastembed/ONNX). Empty string disables it.
+    # Multilingual option: BAAI/bge-reranker-v2-m3-int8 (~570 MB).
+    reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    rerank_candidates: int = 20
 
     google_client_id: str = ""
     google_client_secret: str = ""

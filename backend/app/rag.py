@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -54,25 +55,48 @@ def build_prompt(question: str, numbered) -> str:
     return f"Context passages:\n{ctx}\n\nQuestion: {question}\n\nAnswer with citations:"
 
 
-def answer_question(
-    db: Session, svc: Services, user: User, question: str, history: list[dict] | None = None, k: int = 6
-) -> dict:
-    search_q = rewrite_question(svc, question, history or [])
-    hits = svc.store.search(svc.embedder.embed_query(search_q), search_q, principals_for(user), limit=k)
+def cited_numbers(answer: str) -> set[int]:
+    """Source numbers the answer cites. Handles [1], [1, 2] and [1,2,3]."""
+    nums: set[int] = set()
+    for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer):
+        nums.update(int(n) for n in re.findall(r"\d+", group))
+    return nums
 
-    if not hits:  # nothing accessible: don't call the LLM at all
-        answer, used = NO_ACCESS, set()
-        numbered, docs = [], []
-    else:
-        numbered, docs = number_sources(hits)
-        answer = svc.llm.generate(SYSTEM, build_prompt(search_q, numbered))
-        used = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
+
+@dataclass
+class Prepared:
+    search_query: str
+    docs: list[dict]
+    prompt: str | None  # None => nothing accessible, the LLM must not be called
+
+
+def prepare(db: Session, svc: Services, user: User, question: str, history: list[dict] | None = None, k: int = 6) -> Prepared:
+    """All the DB/retrieval work for one question (rewrite, ACL-filtered search,
+    rerank, audit log). Done up front so streaming never touches the DB session."""
+    search_q = rewrite_question(svc, question, history or [])
+    # Retrieve a wider, ACL-filtered candidate pool, then let the reranker pick the best k.
+    pool = svc.rerank_candidates if svc.reranker else k
+    hits = svc.store.search(svc.embedder.embed_query(search_q), search_q, principals_for(user), limit=pool)
+    if svc.reranker:
+        hits = svc.reranker.rerank(search_q, hits, k)
 
     db.add(AuditLog(user_id=user.id, question=question, doc_ids=sorted({h.doc_id for h in hits}), answered=bool(hits)))
     db.commit()
 
+    if not hits:
+        return Prepared(search_q, [], None)
+    numbered, docs = number_sources(hits)
+    return Prepared(search_q, docs, build_prompt(search_q, numbered))
+
+
+def answer_question(
+    db: Session, svc: Services, user: User, question: str, history: list[dict] | None = None, k: int = 6
+) -> dict:
+    p = prepare(db, svc, user, question, history, k)
+    answer = NO_ACCESS if p.prompt is None else svc.llm.generate(SYSTEM, p.prompt)
+    used = cited_numbers(answer)
     return {
         "answer": answer,
-        "search_query": search_q,
-        "citations": [{**d, "cited": d["n"] in used} for d in docs],
+        "search_query": p.search_query,
+        "citations": [{**d, "cited": d["n"] in used} for d in p.docs],
     }

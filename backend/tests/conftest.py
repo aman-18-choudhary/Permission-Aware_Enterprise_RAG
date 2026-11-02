@@ -52,6 +52,10 @@ class FakeLLM:
         self.prompts: list[str] = []  # answer prompts only
         self.rewrites: list[str] = []
 
+    def generate_stream(self, system, prompt):
+        self.prompts.append(prompt)
+        yield from ("Here is ", "the answer ", "[1].")
+
     def generate(self, system, prompt):
         if system.startswith("Rewrite the user's latest message"):
             self.rewrites.append(prompt)

@@ -9,7 +9,7 @@ Slides for the idea: [`docs/Second_Brain_RAG_Presentation.pptx`](docs/Second_Bra
 ```
 Upload / GitHub / Drive ─▶ parse ─▶ chunk ─▶ Gemini embeddings ─▶ Qdrant
                                               (dense + sparse BM25-style vectors, ACL in payload)
-Question ─▶ user's principals ─▶ Qdrant hybrid search (RRF) with ACL PRE-filter ─▶ Gemini answer + citations
+Question ─▶ user's principals ─▶ Qdrant hybrid search (RRF) with ACL PRE-filter ─▶ cross-encoder rerank ─▶ Gemini answer (streamed) + citations
 ```
 
 - **ACL model** ([`backend/app/acl.py`](backend/app/acl.py)): each document stores principals
@@ -22,6 +22,13 @@ Question ─▶ user's principals ─▶ Qdrant hybrid search (RRF) with ACL PRE
   "Anyone with the link" files are *not* treated as public.
 - **Auth**: Google OAuth (login = `openid email profile`; Drive is a separate opt-in consent with read-only scope).
   Session is an HttpOnly, SameSite=Lax JWT cookie; Drive refresh tokens are encrypted at rest.
+- **Reranking**: retrieval pulls 20 ACL-filtered candidates; a local cross-encoder (fastembed/ONNX,
+  `RERANKER_MODEL`, default MiniLM, no API quota) keeps the best 6. It only ever sees accessible chunks. Falls
+  back to the hybrid-search order if the model can't load. Empty `RERANKER_MODEL` disables it.
+- **Streaming**: `POST /chat/stream` (server-sent events): `meta` (sources) first, then `token`s, then `done`.
+- **Gemini free tier**: embeddings are throttled client-side (`EMBED_PER_MINUTE`, default 90 of the 100/min limit),
+  429s wait for Google's retry hint, and a bad file is skipped (reported in the source's status) instead of
+  failing the whole sync. Re-syncs skip unchanged files, so a quota-limited sync resumes where it stopped.
 - **Follow-ups**: the client sends recent turns; the backend rewrites the latest message into a standalone
   search question (falls back to the original if that fails). History never widens access: retrieval is
   always filtered for the signed-in user. Citations are grouped per document.
@@ -54,10 +61,11 @@ Set `FORCE_IPV4=true` in `.env` (see `backend/app/net.py`).
 ```bash
 cd backend && .venv/bin/python -m pytest -q
 ```
-Covers: private docs invisible to others (and never sent to the LLM), org sharing, exact-ID keyword matching,
-ACL grant/revoke without re-embedding, group principals, upstream-deletion pruning, Drive ACL translation, authz.
-Tests use a fake embedder/LLM; **Gemini, Google OAuth, Drive and GitHub calls are not covered by automated tests**
-and need a manual pass with real credentials.
+Covers (26 tests): private docs invisible to others (and never sent to the LLM), org sharing, exact-ID keyword matching,
+ACL grant/revoke without re-embedding, group principals, upstream-deletion pruning, Drive ACL translation, authz,
+reranker only seeing accessible chunks, streaming events and ACL, follow-up rewriting, citation parsing, Gemini rate limiting.
+Tests use a fake embedder/LLM; **real Gemini, Google OAuth and Drive calls are not covered by automated tests**
+and need a manual pass with real credentials (GitHub sync, Gemini and the reranker were verified manually).
 
 ## Known limitations / next steps
 
@@ -65,6 +73,7 @@ and need a manual pass with real credentials.
   (`PUT /admin/users/{id}/groups`), not auto-synced from Google (needs Cloud Identity / Admin SDK).
 - **GitHub ACL** is per-source (private = you, org = everyone), not mirrored from repo collaborators.
 - The same Drive file synced by two users is indexed twice (once per user's source).
-- No reranker yet (RRF only), no streaming, chat history lives in the browser tab only, PDF text only (no OCR).
+- Chat history lives in the browser tab only; PDF text only (no OCR). Large first syncs are slow on the free tier (~90 chunks/min).
+- Default reranker model is English-only; for other languages use `BAAI/bge-reranker-v2-m3-int8` (~570 MB).
 - Schema is created with `create_all`; add Alembic before real production use.
 - Sync runs in FastAPI background tasks; move to a queue (Celery/Arq) for scale.

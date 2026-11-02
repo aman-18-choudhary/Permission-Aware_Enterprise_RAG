@@ -21,3 +21,37 @@ export const json = (body: unknown): RequestInit => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+
+type StreamHandlers = {
+  meta?: (d: { search_query: string; citations: Citation[] }) => void;
+  token?: (d: { text: string }) => void;
+  done?: (d: { cited: number[] }) => void;
+  error?: (d: { message: string }) => void;
+};
+
+/** POST /chat/stream and dispatch server-sent events (EventSource can't POST). */
+export async function streamChat(
+  question: string,
+  history: { role: string; content: string }[],
+  h: StreamHandlers,
+): Promise<void> {
+  const res = await fetch("/api/chat/stream", { ...json({ question, history }), credentials: "include" });
+  if (res.status === 401) throw new Error("unauthenticated");
+  if (!res.ok || !res.body) throw new Error(res.statusText || "request failed");
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i: number;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const event = /^event: (.+)$/m.exec(block)?.[1] as keyof StreamHandlers | undefined;
+      const data = /^data: (.+)$/m.exec(block)?.[1];
+      if (event && data && h[event]) (h[event] as (d: unknown) => void)(JSON.parse(data));
+    }
+  }
+}

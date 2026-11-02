@@ -86,7 +86,7 @@ def test_deleted_upstream_documents_are_pruned(client_factory, svc, db, monkeypa
 
     def fake_sync(db_, svc_, source):
         ingest_document(db_, svc_, source, "keep", "keep.md", None, "Keep this document about pineapples.", [TENANT_ALL])
-        return {"keep"}
+        return {"keep"}, []
 
     ingest_document(db, svc, src, "gone", "gone.md", None, "Removed document about pineapples too.", [TENANT_ALL])
     monkeypatch.setitem(SYNCERS, "github", fake_sync)
@@ -178,3 +178,83 @@ def test_rewrite_failure_falls_back_to_original_question(client_factory, svc, mo
     h = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     out = alice.post("/chat", json={"question": "falcon roadmap", "history": h}).json()
     assert out["search_query"] == "falcon roadmap" and out["citations"]
+
+
+class PromoteNeedle:
+    """Stand-in reranker: puts the passage mentioning 'needle' first; records what it was shown."""
+
+    def __init__(self):
+        self.seen_texts: list[str] = []
+
+    def rerank(self, query, hits, top_k):
+        self.seen_texts += [h.text for h in hits]
+        return sorted(hits, key=lambda h: "needle" not in h.text)[:top_k]
+
+
+def test_reranker_reorders_but_only_sees_acl_filtered_candidates(client_factory, svc):
+    alice, bob = client_factory("alice@acme.com"), client_factory("bob@acme.com")
+    upload(alice, "secret.md", "Confidential needle: board acquisition plan for project orchid.", "private")
+    upload(bob, "a.md", "Orchid care guide: water weekly and keep in indirect light.", "org")
+    upload(bob, "b.md", "The orchid needle-nose pliers are stored in the toolbox.", "org")
+    rr = PromoteNeedle()
+    svc.reranker = rr
+
+    out = ask(bob, "orchid")
+    assert out["citations"][0]["title"] == "b.md"  # reranker's choice wins over search order
+    assert not any("acquisition plan" in t for t in rr.seen_texts)  # never saw alice's private text
+    assert all("acquisition" not in c["snippet"] for c in out["citations"])
+
+
+def parse_sse(text):
+    events = []
+    for block in text.strip().split("\n\n"):
+        lines = dict(l.split(": ", 1) for l in block.split("\n"))
+        events.append((lines["event"], __import__("json").loads(lines["data"])))
+    return events
+
+
+def test_stream_sends_sources_first_then_tokens_then_done(client_factory):
+    alice = client_factory("alice@acme.com")
+    upload(alice, "plan.md", "Roadmap codename falcon launches in March.")
+    r = alice.post("/chat/stream", json={"question": "falcon roadmap"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    ev = parse_sse(r.text)
+    names = [n for n, _ in ev]
+    assert names[0] == "meta" and names[-1] == "done" and names.count("token") == 3
+    assert ev[0][1]["citations"][0]["title"] == "plan.md"
+    assert "".join(d["text"] for n, d in ev if n == "token") == "Here is the answer [1]."
+    assert ev[-1][1]["cited"] == [1]
+
+
+def test_stream_respects_acl_and_never_calls_llm_without_access(client_factory, svc):
+    alice, bob = client_factory("alice@acme.com"), client_factory("bob@acme.com")
+    upload(alice, "plan.md", "Roadmap codename falcon launches in March.")
+    ev = parse_sse(bob.post("/chat/stream", json={"question": "falcon roadmap"}).text)
+    assert ev[0][1]["citations"] == []
+    assert "".join(d["text"] for n, d in ev if n == "token") == NO_ACCESS
+    assert svc.llm.prompts == []
+
+
+def test_stream_requires_login_and_reports_llm_failure(client_factory, svc, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    assert TestClient(app).post("/chat/stream", json={"question": "x"}).status_code == 401
+
+    alice = client_factory("alice@acme.com")
+    upload(alice, "plan.md", "Roadmap codename falcon launches in March.")
+
+    def boom(system, prompt):
+        raise RuntimeError("secret internal detail")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(svc.llm, "generate_stream", boom)
+    ev = parse_sse(alice.post("/chat/stream", json={"question": "falcon roadmap"}).text)
+    assert ev[-1][0] == "error" and "secret internal detail" not in ev[-1][1]["message"]
+
+
+def test_cited_numbers_handles_lists():
+    from app.rag import cited_numbers
+
+    assert cited_numbers("A [1]. B [2, 3]. C [4,5].") == {1, 2, 3, 4, 5}
+    assert cited_numbers("no cites, array[0] ok? [x]") == {0}  # bare digits in brackets still count

@@ -25,6 +25,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       qdrant: { condition: service_started }
+    volumes: [models:/models]  # cached reranker model (downloaded on first use)
     ports: ["127.0.0.1:8000:8000"]
 
   frontend:
@@ -36,5 +37,6 @@ services:
     ports: ["3000:3000"]
 
 volumes:
+  models:
   pgdata:
   qdrant:
