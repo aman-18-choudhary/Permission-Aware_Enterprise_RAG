@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import httpx
 
 from ..config import get_settings
@@ -44,15 +46,23 @@ def fetch_repo(repo: str, branch: str | None = None, token: str = ""):
         r = c.get(f"{API}/repos/{repo}/git/trees/{branch}", params={"recursive": "1"})
         r.raise_for_status()
         entries = [e for e in r.json().get("tree", []) if e["type"] == "blob" and wanted(e["path"], e.get("size", 0))]
-        for e in entries[:MAX_FILES]:
-            if token:
-                raw = c.get(
-                    f"{API}/repos/{repo}/contents/{e['path']}",
-                    params={"ref": branch},
-                    headers={"Accept": "application/vnd.github.raw+json"},
-                )
-            else:
-                raw = c.get(f"{RAW}/{repo}/{branch}/{e['path']}", headers={})
-            if raw.status_code != 200:
-                continue
-            yield e["path"], f"https://github.com/{repo}/blob/{branch}/{e['path']}", raw.text
+
+        def fetch(e):
+            try:
+                if token:
+                    raw = c.get(
+                        f"{API}/repos/{repo}/contents/{e['path']}",
+                        params={"ref": branch},
+                        headers={"Accept": "application/vnd.github.raw+json"},
+                    )
+                else:
+                    raw = c.get(f"{RAW}/{repo}/{branch}/{e['path']}", headers={})
+                return e, raw.text if raw.status_code == 200 else None
+            except httpx.HTTPError:
+                return e, None
+
+        # Downloads overlap (they're network-bound); ingestion stays sequential in the caller.
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for e, text in pool.map(fetch, entries[:MAX_FILES]):
+                if text is not None:
+                    yield e["path"], f"https://github.com/{repo}/blob/{branch}/{e['path']}", text

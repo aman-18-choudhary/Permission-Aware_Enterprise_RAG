@@ -2,13 +2,17 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import text
 
 from .config import get_settings
-from .db import Base, engine
+from .db import engine
+from .migrate import run_migrations
 from .net import prefer_ipv4
 from .routes import admin, auth, chat, sources
+from .services import Services, get_services
 
+logging.basicConfig(level=get_settings().log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 if get_settings().force_ipv4:
     prefer_ipv4()
 
@@ -32,7 +36,7 @@ def _warm_up() -> None:
 async def lifespan(app: FastAPI):
     s = get_settings()
     s.validate_for_runtime()
-    Base.metadata.create_all(engine)  # TODO: Alembic migrations before real production use
+    run_migrations()
     if s.reranker_model and s.gemini_api_key:
         threading.Thread(target=_warm_up, daemon=True).start()
     yield
@@ -45,4 +49,18 @@ for r in (auth.router, sources.router, chat.router, admin.router):
 
 @app.get("/health")
 def health():
+    """Liveness: the process is up."""
+    return {"ok": True}
+
+
+@app.get("/health/ready")
+def ready(svc: Services = Depends(get_services)):
+    """Readiness: database and vector store both answer."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        svc.store.count()
+    except Exception:
+        log.exception("readiness check failed")
+        raise HTTPException(503, "dependency unavailable")
     return {"ok": True}

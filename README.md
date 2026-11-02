@@ -61,11 +61,49 @@ Set `FORCE_IPV4=true` in `.env` (see `backend/app/net.py`).
 ```bash
 cd backend && .venv/bin/python -m pytest -q
 ```
-Covers (26 tests): private docs invisible to others (and never sent to the LLM), org sharing, exact-ID keyword matching,
+Covers (30 tests): private docs invisible to others (and never sent to the LLM), org sharing, exact-ID keyword matching,
 ACL grant/revoke without re-embedding, group principals, upstream-deletion pruning, Drive ACL translation, authz,
 reranker only seeing accessible chunks, streaming events and ACL, follow-up rewriting, citation parsing, Gemini rate limiting.
 Tests use a fake embedder/LLM; **real Gemini, Google OAuth and Drive calls are not covered by automated tests**
 and need a manual pass with real credentials (GitHub sync, Gemini and the reranker were verified manually).
+
+## API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /auth/login`, `/auth/callback`, `POST /auth/logout`, `GET /auth/me` | Google sign-in, session |
+| `GET /auth/drive/connect` | Opt-in Drive consent (read-only scope) |
+| `GET /sources`, `POST /sources/upload`, `POST /sources/github`, `POST /sources/{id}/sync`, `DELETE /sources/{id}` | Manage your sources |
+| `POST /chat`, `POST /chat/stream` (SSE) | Ask a question (20/min/user) |
+| `GET /admin/status`, `GET /admin/users`, `PUT /admin/users/{id}/groups` | Admin only |
+| `GET /health`, `GET /health/ready` | Liveness / readiness (DB + Qdrant) |
+
+## Configuration
+
+All via environment (see [`.env.example`](.env.example)): `SECRET_KEY`, `POSTGRES_PASSWORD`, `GEMINI_API_KEY`
+(+ `GEMINI_CHAT_MODEL`, `GEMINI_EMBED_MODEL`, `EMBED_PER_MINUTE`), `GOOGLE_CLIENT_ID/SECRET`, `PUBLIC_URL`,
+`ADMIN_EMAILS`, `GITHUB_TOKEN` (optional), `RERANKER_MODEL`, `CHAT_PER_MINUTE`, `QDRANT_URL`, `LOG_LEVEL`,
+`FORCE_IPV4`, `ENV`.
+
+## Database migrations
+
+Alembic runs automatically at backend startup (`app/migrate.py`). A database created by an older build
+(tables but no `alembic_version`) is adopted in place, no data is touched. To change the schema:
+
+```bash
+cd backend && .venv/bin/alembic revision --autogenerate -m "describe change"   # then review the file
+```
+
+## Production checklist
+
+- `ENV=prod` (refuses weak `SECRET_KEY`, refuses `AUTH_DEV_MODE`, marks cookies `Secure`) and `FORCE_IPV4=false` unless you need it.
+- Serve over **HTTPS** behind a reverse proxy (Caddy/nginx/Traefik) and set `PUBLIC_URL=https://your-domain`.
+  Add `https://your-domain/api/auth/callback` to the Google OAuth client's redirect URIs.
+- Publish the OAuth consent screen (or keep test users) and keep the Drive scope read-only.
+- Back up the `pgdata` and `qdrant` volumes (`pg_dump`; Qdrant snapshots). The index can always be rebuilt by re-syncing.
+- Set `ADMIN_EMAILS` to the real admins; rotate keys that were ever pasted into chats or tickets.
+- Watch `/admin` for failed syncs and the audit log; `GET /health/ready` is wired into the compose healthcheck.
+- CI (`.github/workflows/ci.yml`) runs the tests, the frontend type-check/build and both Docker builds.
 
 ## Known limitations / next steps
 
@@ -75,5 +113,6 @@ and need a manual pass with real credentials (GitHub sync, Gemini and the rerank
 - The same Drive file synced by two users is indexed twice (once per user's source).
 - Chat history lives in the browser tab only; PDF text only (no OCR). Large first syncs are slow on the free tier (~90 chunks/min).
 - Default reranker model is English-only; for other languages use `BAAI/bge-reranker-v2-m3-int8` (~570 MB).
-- Schema is created with `create_all`; add Alembic before real production use.
-- Sync runs in FastAPI background tasks; move to a queue (Celery/Arq) for scale.
+- Sync runs in FastAPI background tasks and the chat rate limiter is in-process: fine for one backend replica;
+  for several replicas move sync to a queue (Celery/Arq) and the limiter to Redis.
+- Gemini free tier has daily limits too; a paid key removes the throttling pain.

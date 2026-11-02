@@ -258,3 +258,15 @@ def test_cited_numbers_handles_lists():
 
     assert cited_numbers("A [1]. B [2, 3]. C [4,5].") == {1, 2, 3, 4, 5}
     assert cited_numbers("no cites, array[0] ok? [x]") == {0}  # bare digits in brackets still count
+
+
+def test_chat_endpoints_are_rate_limited_per_user(client_factory, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "chat_per_minute", 2)
+    alice, bob = client_factory("alice@acme.com"), client_factory("bob@acme.com")
+    assert ask(alice, "one")["answer"] and ask(alice, "two")["answer"]
+    r = alice.post("/chat", json={"question": "three"})
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
+    assert alice.post("/chat/stream", json={"question": "x"}).status_code == 429  # shared budget
+    assert bob.post("/chat", json={"question": "mine"}).status_code == 200  # other users unaffected

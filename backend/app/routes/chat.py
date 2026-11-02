@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import User
 from ..rag import MAX_HISTORY_TURNS, NO_ACCESS, SYSTEM, answer_question, cited_numbers, prepare
-from ..security import current_user
+from ..ratelimit import limit_chat
 from ..services import Services, get_services
 
 router = APIRouter(tags=["chat"])
@@ -37,7 +37,7 @@ def _history(body: ChatIn) -> list[dict]:
 def chat(
     body: ChatIn,
     db: Session = Depends(get_db),
-    user: User = Depends(current_user),
+    user: User = Depends(limit_chat),
     svc: Services = Depends(get_services),
 ):
     return answer_question(db, svc, user, body.question.strip(), _history(body))
@@ -51,7 +51,7 @@ def _sse(event: str, data: dict) -> str:
 def chat_stream(
     body: ChatIn,
     db: Session = Depends(get_db),
-    user: User = Depends(current_user),
+    user: User = Depends(limit_chat),
     svc: Services = Depends(get_services),
 ):
     """Server-sent events: `meta` (sources, sent before any text), many `token`s, then `done`

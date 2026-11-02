@@ -33,6 +33,8 @@ class Settings(BaseSettings):
 
     github_token: str = ""
     max_upload_mb: int = 10
+    chat_per_minute: int = 20  # per user
+    log_level: str = "INFO"
     force_ipv4: bool = False  # set true if outbound calls hang (broken IPv6 route)
 
     @property

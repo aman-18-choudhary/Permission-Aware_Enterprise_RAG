@@ -80,3 +80,16 @@ def test_github_file_filter_skips_noise():
     assert not wanted("frontend/node_modules/x/index.js", 1_000)
     assert not wanted("assets/logo.png", 1_000)
     assert not wanted("big.md", 900_000)
+
+
+def test_chat_limiter_blocks_then_recovers():
+    from app.ratelimit import SlidingWindowLimiter
+
+    t = {"now": 0.0}
+    lim = SlidingWindowLimiter(clock=lambda: t["now"])
+    assert [lim.check("u", 3) for _ in range(3)] == [None, None, None]
+    wait = lim.check("u", 3)
+    assert wait is not None and 59 < wait <= 60
+    assert lim.check("other-user", 3) is None  # keyed per user
+    t["now"] = 61.0
+    assert lim.check("u", 3) is None

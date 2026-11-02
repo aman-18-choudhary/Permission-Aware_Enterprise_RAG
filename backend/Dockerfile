@@ -4,6 +4,8 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY app ./app
+COPY alembic.ini ./
+COPY alembic ./alembic
 ENV FASTEMBED_CACHE_PATH=/models
 RUN useradd -m app && mkdir /models && chown -R app /srv /models
 USER app
